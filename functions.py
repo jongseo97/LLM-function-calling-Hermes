@@ -2,14 +2,19 @@ import re
 import inspect
 import requests
 import pandas as pd
-import yfinance as yf
 import concurrent.futures
 
 from typing import List
-from bs4 import BeautifulSoup
 from utils import inference_logger
 from langchain.tools import tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
+
+from fake_useragent import UserAgent
+from serpapi import GoogleSearch
+from bs4 import BeautifulSoup
+
+#my functions
+from tools.F_predict.F_main import F_main
 
 @tool
 def code_interpreter(code_markdown: str) -> dict | str:
@@ -66,25 +71,34 @@ def code_interpreter(code_markdown: str) -> dict | str:
 def google_search_and_scrape(query: str) -> dict:
     """
     Performs a Google search for the given query, retrieves the top search result URLs,
-    and scrapes the text content and table data from those pages in parallel.
+    and scrapes the text content and table data from those pages in parallel. 
+    Use this function whenever the user asks for information that is not explicitly available within your knowledge base. 
 
     Args:
-        query (str): The search query.
+        query (str): The search query provided by the user.
+        
     Returns:
         list: A list of dictionaries containing the URL, text content, and table data for each scraped page.
     """
     num_results = 2
     url = 'https://www.google.com/search'
     params = {'q': query, 'num': num_results}
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.61 Safari/537.3'}
+    api_key = "44d8c282748defc8e8e705fd248d49493e9dc78d30682749811a7920d2b11cfc"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    params = {
+        "engine": "google",
+        "q": query,
+        "api_key": api_key,
+        "num": num_results
+    }
+
+    search = GoogleSearch(params)
+    response = search.get_dict()
     
-    inference_logger.info(f"Performing google search with query: {query}\nplease wait...")
-    response = requests.get(url, params=params, headers=headers)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    urls = [result.find('a')['href'] for result in soup.find_all('div', class_='tF2Cxc')]
-    
-    inference_logger.info(f"Scraping text from urls, please wait...") 
-    [inference_logger.info(url) for url in urls]
+    # 검색 결과에서 URL 추출
+    urls = [item["link"] for item in response.get("organic_results", [])[:num_results]]
+
+    # 병렬 크롤링 실행
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = [executor.submit(lambda url: (url, requests.get(url, headers=headers).text if isinstance(url, str) else None), url) for url in urls[:num_results] if isinstance(url, str)]
         results = []
@@ -94,220 +108,109 @@ def google_search_and_scrape(query: str) -> dict:
             paragraphs = [p.text.strip() for p in soup.find_all('p') if p.text.strip()]
             text_content = ' '.join(paragraphs)
             text_content = re.sub(r'\s+', ' ', text_content)
+            text_content = text_content[:1000]
             table_data = [[cell.get_text(strip=True) for cell in row.find_all('td')] for table in soup.find_all('table') for row in table.find_all('tr')]
             if text_content or table_data:
                 results.append({'url': url, 'content': text_content, 'tables': table_data})
     return results
 
 @tool
-def get_current_stock_price(symbol: str) -> float:
-  """
-  Get the current stock price for a given symbol.
-
-  Args:
-    symbol (str): The stock symbol.
-
-  Returns:
-    float: The current stock price, or None if an error occurs.
-  """
-  try:
-    stock = yf.Ticker(symbol)
-    # Use "regularMarketPrice" for regular market hours, or "currentPrice" for pre/post market
-    current_price = stock.info.get("regularMarketPrice", stock.info.get("currentPrice"))
-    return current_price if current_price else None
-  except Exception as e:
-    print(f"Error fetching current price for {symbol}: {e}")
-    return None
-
-@tool
-def get_stock_fundamentals(symbol: str) -> dict:
+def CAS_to_SMILES(cas : str) -> str:
     """
-    Get fundamental data for a given stock symbol using yfinance API.
-
+    Retrieve the SMILES representation of a chemical compound given its CAS number.
+    Use this function whenever the user requests a SMILES from a CAS number.
+    
     Args:
-        symbol (str): The stock symbol.
+        cas (str): The CAS Registry Number of the chemical compound. 
 
     Returns:
-        dict: A dictionary containing fundamental data.
-            Keys:
-                - 'symbol': The stock symbol.
-                - 'company_name': The long name of the company.
-                - 'sector': The sector to which the company belongs.
-                - 'industry': The industry to which the company belongs.
-                - 'market_cap': The market capitalization of the company.
-                - 'pe_ratio': The forward price-to-earnings ratio.
-                - 'pb_ratio': The price-to-book ratio.
-                - 'dividend_yield': The dividend yield.
-                - 'eps': The trailing earnings per share.
-                - 'beta': The beta value of the stock.
-                - '52_week_high': The 52-week high price of the stock.
-                - '52_week_low': The 52-week low price of the stock.
+        str: The SMILES representation of the given chemical compound.
     """
-    try:
-        stock = yf.Ticker(symbol)
-        info = stock.info
-        fundamentals = {
-            'symbol': symbol,
-            'company_name': info.get('longName', ''),
-            'sector': info.get('sector', ''),
-            'industry': info.get('industry', ''),
-            'market_cap': info.get('marketCap', None),
-            'pe_ratio': info.get('forwardPE', None),
-            'pb_ratio': info.get('priceToBook', None),
-            'dividend_yield': info.get('dividendYield', None),
-            'eps': info.get('trailingEps', None),
-            'beta': info.get('beta', None),
-            '52_week_high': info.get('fiftyTwoWeekHigh', None),
-            '52_week_low': info.get('fiftyTwoWeekLow', None)
-        }
-        return fundamentals
-    except Exception as e:
-        print(f"Error getting fundamentals for {symbol}: {e}")
-        return {}
+
+    ua = UserAgent()
+    requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
+    header = {"User-Agent":ua.random}
+    
+    url = f'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{cas}/property/isomericsmiles/txt'
+    r = requests.get(url, verify=False, headers = header, timeout=100)
+    if r.status_code != 200:
+        return None
+    r.encoding = 'utf-8'
+    smiles = r.text.strip()
+    smiles = smiles.split('\n')[0]
+    return smiles     
 
 @tool
-def get_financial_statements(symbol: str) -> dict:
+def SMILES_to_CID(smiles : str) -> str:
     """
-    Get financial statements for a given stock symbol.
-
+    Retrieve the PubChem Compound ID (CID) for a given SMILES string.
+    Use this function whenever the user requests a PubChem CID from a SMILES string.
+    
     Args:
-    symbol (str): The stock symbol.
+        smiles (str): The SMILES representation of the chemical compound.
 
     Returns:
-    dict: Dictionary containing financial statements (income statement, balance sheet, cash flow statement).
+        str: The PubChem CID of the given chemical compound.
     """
-    try:
-        stock = yf.Ticker(symbol)
-        financials = stock.financials
-        return financials
-    except Exception as e:
-        print(f"Error fetching financial statements for {symbol}: {e}")
-        return {}
+    url = f'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/{smiles}/cids/txt'
+    ua = UserAgent()
+    requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
+    header = {"User-Agent":ua.random}
+    r = requests.get(url, verify=False, headers = header, timeout=10)
+    if r.status_code != 200:
+        return None
+    r.encoding = 'utf-8'
+    cid = r.text.strip()
+    cid = cid.split('\n')[0]
+    return cid
 
 @tool
-def get_key_financial_ratios(symbol: str) -> dict:
+def CID_to_NAME(cid : str) -> str:
     """
-    Get key financial ratios for a given stock symbol.
-
+    Retrieve the chemical compound name for a given PubChem Compound ID (CID).
+    Use this function whenever the user requests the chemical name from a PubChem CID.
+    
     Args:
-    symbol (str): The stock symbol.
+        cid (str): The PubChem Compound ID of the chemical compound.
 
     Returns:
-    dict: Dictionary containing key financial ratios.
+        str: The common or IUPAC name of the given chemical compound.    
     """
-    try:
-        stock = yf.Ticker(symbol)
-        key_ratios = stock.info
-        return key_ratios
-    except Exception as e:
-        print(f"Error fetching key financial ratios for {symbol}: {e}")
-        return {}
+    url = f'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/property/iupacname/txt'
+    ua = UserAgent()
+    requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
+    header = {"User-Agent":ua.random}
+    r = requests.get(url, verify=False, headers = header, timeout=10)
+    if r.status_code != 200:
+        return None
+    r.encoding = 'utf-8'
+    name = r.text.strip()
+    return name
 
 @tool
-def get_analyst_recommendations(symbol: str) -> pd.DataFrame:
+def SMILES_to_USE(smiles:str) -> list:
     """
-    Get analyst recommendations for a given stock symbol.
-
+    Predicts the functional uses of a given chemical compounds based on their SMILES representations.
+    Use this function whenever the user requests functional uses of chemical.
+    
     Args:
-    symbol (str): The stock symbol.
+        smiles (str): SMILES strings.
 
     Returns:
-    pd.DataFrame: DataFrame containing analyst recommendations.
+        list: A list where each element corresponds to the predicted functions of the respective SMILES string in the input list, 
+        each function prediction is represented as a single string containing multiple functional categories separated by a semicolon (';'). 
     """
-    try:
-        stock = yf.Ticker(symbol)
-        recommendations = stock.recommendations
-        return recommendations
-    except Exception as e:
-        print(f"Error fetching analyst recommendations for {symbol}: {e}")
-        return pd.DataFrame()
-
-@tool
-def get_dividend_data(symbol: str) -> pd.DataFrame:
-    """
-    Get dividend data for a given stock symbol.
-
-    Args:
-    symbol (str): The stock symbol.
-
-    Returns:
-    pd.DataFrame: DataFrame containing dividend data.
-    """
-    try:
-        stock = yf.Ticker(symbol)
-        dividends = stock.dividends
-        return dividends
-    except Exception as e:
-        print(f"Error fetching dividend data for {symbol}: {e}")
-        return pd.DataFrame()
-
-@tool
-def get_company_news(symbol: str) -> pd.DataFrame:
-    """
-    Get company news and press releases for a given stock symbol.
-
-    Args:
-    symbol (str): The stock symbol.
-
-    Returns:
-    pd.DataFrame: DataFrame containing company news and press releases.
-    """
-    try:
-        news = yf.Ticker(symbol).news
-        return news
-    except Exception as e:
-        print(f"Error fetching company news for {symbol}: {e}")
-        return pd.DataFrame()
-
-@tool
-def get_technical_indicators(symbol: str) -> pd.DataFrame:
-    """
-    Get technical indicators for a given stock symbol.
-
-    Args:
-    symbol (str): The stock symbol.
-
-    Returns:
-    pd.DataFrame: DataFrame containing technical indicators.
-    """
-    try:
-        indicators = yf.Ticker(symbol).history(period="max")
-        return indicators
-    except Exception as e:
-        print(f"Error fetching technical indicators for {symbol}: {e}")
-        return pd.DataFrame()
-
-@tool
-def get_company_profile(symbol: str) -> dict:
-    """
-    Get company profile and overview for a given stock symbol.
-
-    Args:
-    symbol (str): The stock symbol.
-
-    Returns:
-    dict: Dictionary containing company profile and overview.
-    """
-    try:
-        profile = yf.Ticker(symbol).info
-        return profile
-    except Exception as e:
-        print(f"Error fetching company profile for {symbol}: {e}")
-        return {}
+    function_list = F_main([smiles])
+    return function_list
 
 def get_openai_tools() -> List[dict]:
     functions = [
-        code_interpreter,
+        # code_interpreter,
         google_search_and_scrape,
-        get_current_stock_price,
-        get_company_news,
-        get_company_profile,
-        get_stock_fundamentals,
-        get_financial_statements,
-        get_key_financial_ratios,
-        get_analyst_recommendations,
-        get_dividend_data,
-        get_technical_indicators
+        CAS_to_SMILES,
+        SMILES_to_CID,
+        CID_to_NAME,
+        SMILES_to_USE
     ]
 
     tools = [convert_to_openai_tool(f) for f in functions]
