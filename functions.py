@@ -83,7 +83,7 @@ def google_search_and_scrape(query: str) -> dict:
     num_results = 2
     url = 'https://www.google.com/search'
     params = {'q': query, 'num': num_results}
-    api_key = "44d8c282748defc8e8e705fd248d49493e9dc78d30682749811a7920d2b11cfc"
+    api_key = "your_api_key"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     params = {
         "engine": "google",
